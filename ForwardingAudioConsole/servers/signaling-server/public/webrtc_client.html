@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Audio Receiver</title>
+</head>
+<body>
+    <h2>WebRTC Audio Receiver</h2>
+    <audio id="remoteAudio" autoplay></audio>
+    
+    <script>
+        const signalingServerUrl = "wss://" + window.location.host;
+        const remoteAudio = document.getElementById("remoteAudio");
+        const signalingServer = new WebSocket(signalingServerUrl);
+    
+        let peerConnection;
+
+        signalingServer.onopen = () => {
+            console.log("Connected to signaling server");
+            setupWebRTC();
+        };
+
+        let iceCandidateQueue = [];
+        let isRemoteDescriptionSet = false;
+        signalingServer.onmessage = async (event) => {
+            const messageText = await event.data.text();
+            const message = JSON.parse(messageText);
+
+            if (message.sdp && message.sdp.type === 1) {
+                let sdpString = "v=0\n"; // SDP version
+                sdpString += `o=- 0 0 IN IP4 0.0.0.0\n`; // Origin line
+                sdpString += `s=session\n`; // Session name
+                sdpString += `t=0 0\n`; // Timing line
+
+                // Initialize ICE ufrag and pwd
+                let iceUfrag = '';
+                let icePwd = '';
+
+                // Loop through media information
+                if (Array.isArray(message.sdp.sdp.Media)) {
+                    message.sdp.sdp.Media.forEach(media => {
+                        const mediaType = "audio"; // Assuming media type is audio
+                        const port = media.Port || 9; // Set default port if not available
+                        const transport = media.Transport || "UDP/TLS/RTP/SAVP"; // Default transport
+                        const formats = Object.keys(media.MediaFormats).join(' '); // Join formats into a string
+
+                        // Correctly format the media line
+                        sdpString += `m=${mediaType} ${port} ${transport} ${formats}\n`; // Media line
+
+                        // Add RTP map entries
+                        Object.keys(media.MediaFormats).forEach(format => {
+                            const formatInfo = media.MediaFormats[format];
+                            sdpString += `a=rtpmap:${formatInfo.ID} ${formatInfo.Rtpmap}\n`; // RTP mapping
+                        });
+
+                        // Add the DTLS fingerprint
+                        if (media.DtlsFingerprint) {
+                            const [algorithm, fingerprint] = media.DtlsFingerprint.split(' '); // Split into algorithm and fingerprint
+                            sdpString += `a=fingerprint:${algorithm} ${fingerprint}\n`; // Correctly formatted DTLS fingerprint
+                        }
+
+                        // Add ICE credentials (ufrag and pwd)
+                        iceUfrag = media.IceUfrag || iceUfrag; // Set if available
+                        icePwd = media.IcePwd || icePwd; // Set if available
+
+                        // Add ICE candidates
+                        if (media.IceCandidates) {
+                            media.IceCandidates.forEach(candidate => {
+                                sdpString += `a=candidate:${candidate}\n`; // Add ICE candidates
+                            });
+                        }
+
+                        // Add any additional attributes (if necessary)
+                        if (Array.isArray(media.ExtraMediaAttributes)) {
+                            media.ExtraMediaAttributes.forEach(attr => {
+                                sdpString += `${attr}\n`; // Add extra media attributes
+                            });
+                        }
+                    });
+                }
+
+                // Add ICE ufrag and pwd to the SDP
+                if (iceUfrag && icePwd) {
+                    sdpString += `a=ice-ufrag:${iceUfrag}\n`;
+                    sdpString += `a=ice-pwd:${icePwd}\n`;
+                }
+
+                // Create RTCSessionDescription
+                const remoteSdp = new RTCSessionDescription({
+                    type: "offer",
+                    sdp: sdpString
+                });
+
+                // Set the remote description
+                try {
+                    await peerConnection.setRemoteDescription(remoteSdp);
+                    const answer = await peerConnection.createAnswer();
+                    signalingServer.send(JSON.stringify(answer));
+                    await peerConnection.setLocalDescription(answer);
+                    isRemoteDescriptionSet = true;
+                    // while (iceCandidateQueue.length > 0) {
+                    //     const queuedCandidate = iceCandidateQueue.shift();
+                    //     console.log("Attempting to add queued ICE candidate:", queuedCandidate);
+
+                    //     try {
+                    //         await peerConnection.addIceCandidate(queuedCandidate);
+                    //         console.log("Successfully added queued ICE candidate:", queuedCandidate);
+                    //     } catch (error) {
+                    //         console.error("Failed to add queued ICE candidate:", error);
+                    //         // Additional context for debugging
+                    //         console.error("Candidate details:", queuedCandidate);
+                    //         console.error("Candidate string:", queuedCandidate.candidate);
+                    //         console.error("sdpMid:", queuedCandidate.sdpMid);
+                    //         console.error("sdpMLineIndex:", queuedCandidate.sdpMLineIndex);
+                    //     }
+                    // }
+                } catch (error) {
+                    console.error("Failed to set remote description:", error);
+                }
+            } 
+            // else if (message.ice) {
+            //     // Assuming `message.ice` contains an object with candidate and additional info
+            //     const candidateString = message.ice.candidate; // The ICE candidate string
+            //     const sdpMid = message.ice.sdpMid || "audio"; // Default to "audio" if not provided
+            //     const sdpMLineIndex = message.ice.sdpMLineIndex || 0; // Default to 0 if not provided
+
+            //     try {
+            //         const candidateData = {
+            //             candidate: candidateString,
+            //             sdpMid: message.ice.sdpMid || "audio", // Default to "audio"
+            //             sdpMLineIndex: message.ice.sdpMLineIndex || 0, // Default to 0
+            //             // Ensure these additional fields are also set if required
+            //             foundation: message.ice.foundation || null,
+            //             component: message.ice.component || null,
+            //             priority: message.ice.priority || null,
+            //             address: message.ice.address || null,
+            //             port: message.ice.port || null,
+            //             type: message.ice.type || null,
+            //             usernameFragment: message.ice.usernameFragment || null,
+            //         };
+
+            //         const candidate = new RTCIceCandidate(candidateData); // Create RTCIceCandidate
+            //         console.log("Received ICE candidate:", candidate);
+
+            //         if (isRemoteDescriptionSet) {
+            //             try {
+            //                 //await peerConnection.addIceCandidate(candidate);
+            //                 console.log("Successfully added ICE candidate:", candidate);
+            //             } catch (error) {
+            //                 console.error("Failed to add ICE candidate:", error);
+            //             }
+            //         } else {
+            //             // Otherwise, queue the candidate
+            //             iceCandidateQueue.push(candidate);
+            //         }
+            //     } catch (error) {
+            //         console.error("Failed to create ICE candidate:", error);
+            //     }
+            // }
+        };
+
+        signalingServer.onerror = (error) => {
+            console.error("WebSocket error:", error);
+        };
+    
+        async function setupWebRTC() {
+            peerConnection = new RTCPeerConnection({
+                iceServers: [{ urls: "stun:stun.sipsorcery.com" }]
+            });
+    
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    peerConnection.addIceCandidate(event.candidate);
+                    signalingServer.send(JSON.stringify(event.candidate));
+                }
+            };
+    
+            peerConnection.ontrack = (event) => {
+                remoteAudio.srcObject = event.streams[0];
+                setTimeout(() => {
+                    remoteAudio.play();
+                }, 1000);
+                console.log("Received audio stream:", event.streams[0]);
+            };
+
+            peerConnection.oniceconnectionstatechange = (event) => {
+                console.log(`ICE state: ${peerConnection.iceConnectionState}`);
+                console.log('ICE state change event: ', event);
+            };
+        }
+    </script>
+</body>
+</html>
